@@ -1,0 +1,1 @@
+{ "name": "castle-online", "version": "0.1.0", "scripts": { "start": "node server.js" }, "dependencies": { "ws": "^8.18.0" } }

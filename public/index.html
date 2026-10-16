@@ -1,0 +1,95 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Castle Online</title>
+<style>html,body{width:100%;height:100%}#game{position:fixed;inset:0}canvas{display:block}body{margin:0;background:#111;color:#fff;font:14px sans-serif;overflow:hidden}
+#chat{z-index:10;position:fixed;left:8px;bottom:8px;width:320px}#log{height:120px;overflow:hidden;background:#0008;padding:4px;font-size:12px}
+#chat input{width:100%;box-sizing:border-box}</style></head><body>
+<div id="game"></div>
+<div id="chat"><div id="log"></div><input id="msg" placeholder="Press / to chat" maxlength="120"></div>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+<script>
+if (location.protocol === 'file:') { location.replace('http://localhost:3000/'); }
+const name = (prompt('Your name?') || '').slice(0, 16);
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + (location.host || 'localhost:3000'));
+const held = {};
+const ZSIZE = {outside: [1536, 1024], chapel: [1536, 1024], farm: [1536, 1024], house: [820, 540], barn: [630, 480]};
+let me = null, zone = 'outside', state = {}, sprites = {}, scene, chatQueue = [];
+const log = document.getElementById('log'), msg = document.getElementById('msg');
+const addLog = t => { const d = document.createElement('div'); d.textContent = t; log.appendChild(d); log.scrollTop = 1e6; };
+ws.onopen = () => name && ws.send(JSON.stringify({t: 'name', name}));
+ws.onmessage = e => { const m = JSON.parse(e.data);
+  if (m.t === 'welcome') { me = m.id; zone = m.zone; }
+  else if (m.t === 'state') { zone = m.zone; state = {}; m.p.forEach(p => state[p.id] = p); }
+  else if (m.t === 'chat') { addLog(m.name + ': ' + m.text); chatQueue.push(m); } };
+
+class Main extends Phaser.Scene {
+  preload() { this.load.image('outside', 'outside.png'); ['chapel', 'farm', 'house', 'barn'].forEach(k => this.load.image(k, k + '.png'));
+    ['gate_l', 'gate_r', 'door_l', 'door_r'].forEach(k => this.load.image(k, k + '.png'));
+    this.load.spritesheet('farmer', 'farmer.png', {frameWidth: 48, frameHeight: 48}); }
+  create() { scene = this;
+    this.bg = this.add.image(0, 0, 'outside').setOrigin(0);
+        const imeKey = e => e.isComposing || e.keyCode === 229 || e.key === 'Process' || e.key === 'Dead';
+    window.addEventListener('keydown', e => {
+      if (document.activeElement === msg) return;
+      if (e.code === 'Slash' && e.key === '/' && !imeKey(e) && !e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); msg.focus(); return; }
+      if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) ws.send(JSON.stringify({t: 'attack'})); return; }
+      held[e.code] = true; });
+    window.addEventListener('keyup', e => { held[e.code] = false; });
+    window.addEventListener('blur', () => { for (const k in held) held[k] = false; });
+    msg.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') msg.blur(); if (e.key === 'Enter') { if (msg.value.trim()) ws.send(JSON.stringify({t: 'chat', text: msg.value})); msg.value = ''; msg.blur(); } });
+    // Animated gate + chapel door: leaves squash toward their hinges when a player is near
+    this.leaves = [
+      {open: 0, cx: 766, cy: 890, r: 90, parts: [this.add.image(731, 833, 'gate_l').setOrigin(0, 0).setDepth(941), this.add.image(802, 833, 'gate_r').setOrigin(1, 0).setDepth(941)]},
+      {open: 0, cx: 766, cy: 800, r: 120, parts: [this.add.image(726, 708, 'door_l').setOrigin(0, 0).setDepth(790), this.add.image(807, 708, 'door_r').setOrigin(1, 0).setDepth(790)]}];
+    this.sent = '';
+    // farmer.png: 4x4 grid of 48px frames; rows = up, right, down, left; columns = walk cycle
+    ['up', 'right', 'down', 'left'].forEach((d, row) => {
+      const f = n => this.anims.generateFrameNumbers('farmer', {frames: n});
+      this.anims.create({key: 'idle_' + d, frames: f([row * 4 + 1]), frameRate: 1});
+      this.anims.create({key: 'walk_' + d, frames: f([0, 1, 2, 3].map(c => row * 4 + c)), frameRate: 8, repeat: -1});
+      this.anims.create({key: 'run_' + d, frames: f([0, 1, 2, 3].map(c => row * 4 + c)), frameRate: 13, repeat: -1});
+    });
+    // Placeholder character: swap for your sprite sheet later
+    ['up','down','left','right'].forEach(() => {});
+  }
+  makePlayer(p) {
+    const c = this.add.container(p.x, p.y), sh = this.add.ellipse(0, -2, 34, 11, 0x000000, .3);
+    const spr = this.add.sprite(0, 0, 'farmer').setOrigin(.5, 43 / 48).setScale(2).play('idle_down');
+    const label = this.add.text(0, -80, p.name, {fontSize: '11px', color: '#fff', stroke: '#000', strokeThickness: 3}).setOrigin(.5);
+    c.add([sh, spr, label]); c.spr = spr; c.label = label; c.bubble = null; return c;
+  }
+  update(t, dt) {
+    if (me == null) return;
+    for (const d of this.leaves) {
+      const near = zone === 'outside' && Object.values(state).some(p => Math.hypot(p.x - d.cx, p.y - d.cy) < d.r);
+      d.open += ((near ? 1 : 0) - d.open) * (1 - Math.exp(-dt / 110));
+      d.parts.forEach(s => s.setVisible(zone === 'outside').setScale(1 - .9 * d.open, 1));
+    }
+    const h = c => !!(held[c]), dx = (h('KeyD') || h('ArrowRight')) - (h('KeyA') || h('ArrowLeft')),
+          dy = (h('KeyS') || h('ArrowDown')) - (h('KeyW') || h('ArrowUp')),
+          run = h('ShiftLeft') || h('ShiftRight') ? 1 : 0, cmd = document.activeElement === msg ? '0,0,0' : dx + ',' + dy + ',' + run;
+    if (cmd !== this.sent) { this.sent = cmd; const [a, b, r] = cmd.split(',').map(Number); ws.send(JSON.stringify({t: 'input', dx: a, dy: b, run: !!r})); }
+    if (this.bg.texture.key !== zone) this.bg.setTexture(zone);
+    const sig = zone + innerWidth + 'x' + innerHeight;   // fit camera to the current zone (zoom small interiors)
+    if (sig !== this.camSig) { this.camSig = sig; const [w, h] = ZSIZE[zone] || [1536, 1024], cam = this.cameras.main;
+      const zm = w < 1000 ? Math.min(2, Math.max(1, Math.min(innerWidth / w, innerHeight / h) * .95)) : 1;
+      cam.setZoom(zm); const vw = innerWidth / zm, vh = innerHeight / zm;
+      cam.setBounds(Math.min(0, (w - vw) / 2), Math.min(0, (h - vh) / 2), Math.max(w, vw), Math.max(h, vh)); }
+    for (const id in sprites) if (!state[id]) { sprites[id].destroy(); delete sprites[id]; }
+    for (const p of Object.values(state)) {
+      let s = sprites[p.id] || (sprites[p.id] = this.makePlayer(p));
+      s.x += (p.x - s.x) * .3; s.y += (p.y - s.y) * .3; s.setDepth(s.y); // smooth + y-sort
+      if (s.label.text !== p.name) s.label.setText(p.name);
+      s.spr.play((p.mv ? (p.run ? 'run_' : 'walk_') : 'idle_') + p.dir, true);
+      if (p.atk && !s.wasAtk) this.tweens.add({targets: s.spr, y: -16, duration: 140, yoyo: true, ease: 'Sine.easeOut'});   // Space = hop
+      s.wasAtk = !!p.atk;
+      if (p.id === me && !this.followed) { this.cameras.main.startFollow(s, true, .1, .1); this.followed = true; }
+      if (p.id === me && Math.hypot(p.x - s.x, p.y - s.y) > 150) { s.x = p.x; s.y = p.y; } // snap on zone change
+    }
+    while (chatQueue.length) { const m = chatQueue.shift(), s = sprites[m.id]; if (!s) continue;
+      if (s.bubble) s.bubble.destroy();
+      s.bubble = this.add.text(0, -96, m.text, {fontSize: '11px', color: '#000', backgroundColor: '#fff', padding: {x: 4, y: 2}, wordWrap: {width: 140}}).setOrigin(.5, 1);
+      s.add(s.bubble); const b = s.bubble; this.time.delayedCall(4000, () => b.destroy()); }
+  }
+}
+new Phaser.Game({type: Phaser.AUTO, parent: 'game', backgroundColor: '#111', pixelArt: true,
+  scale: {mode: Phaser.Scale.RESIZE, width: '100%', height: '100%'}, scene: Main});
+</script></body></html>

@@ -1,15 +1,38 @@
-<!doctype html><html><head><meta charset="utf-8"><title>Castle Online</title>
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"><title>Castle Online</title>
 <style>html,body{width:100%;height:100%}#game{position:fixed;inset:0}canvas{display:block}body{margin:0;background:#111;color:#fff;font:14px sans-serif;overflow:hidden}
 #chat{z-index:10;position:fixed;left:8px;bottom:8px;width:320px}#log{height:120px;overflow:hidden;background:#0008;padding:4px;font-size:12px}
-#chat input{width:100%;box-sizing:border-box}</style></head><body>
+#chat input{width:100%;box-sizing:border-box}
+body{touch-action:none;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}#chat input{-webkit-user-select:text;user-select:text;font-size:16px}
+#log:empty{background:none}#touch{display:none}.touch #touch{display:block}
+.touch #chat{top:calc(8px + env(safe-area-inset-top));bottom:auto;left:calc(8px + env(safe-area-inset-left));width:min(320px,58vw)}
+.touch #log{height:84px;pointer-events:none}.touch #chat input{display:none}.touch #chat.open input{display:block}
+#joy{position:fixed;z-index:9;left:calc(28px + env(safe-area-inset-left));bottom:calc(28px + env(safe-area-inset-bottom));width:130px;height:130px;border-radius:50%;background:#ffffff22;border:2px solid #ffffff55;touch-action:none}
+#knob{position:absolute;left:41px;top:41px;width:48px;height:48px;border-radius:50%;background:#ffffffaa;pointer-events:none}
+.tbtn{position:fixed;z-index:9;width:68px;height:68px;border-radius:50%;border:2px solid #ffffff66;background:#00000066;color:#fff;font:bold 14px sans-serif;touch-action:none}
+#bHop{right:calc(30px + env(safe-area-inset-right));bottom:calc(36px + env(safe-area-inset-bottom))}
+#bChat{right:calc(30px + env(safe-area-inset-right));bottom:calc(120px + env(safe-area-inset-bottom));font-size:24px}</style></head><body>
 <div id="game"></div>
-<div id="chat"><div id="log"></div><input id="msg" placeholder="Press / to chat" maxlength="120"></div>
+<div id="touch"><div id="joy"><div id="knob"></div></div><button class="tbtn" id="bChat">💬</button><button class="tbtn" id="bHop">Hop</button></div>
+<div id="chat"><div id="log"></div><input id="msg" placeholder="Press / to chat (or tap 💬)" maxlength="120"></div>
 <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
 <script>
 if (location.protocol === 'file:') { location.replace('http://localhost:3000/'); }
 const name = (prompt('Your name?') || '').slice(0, 16);
 const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + (location.host || 'localhost:3000'));
 const held = {};
+const isTouch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+document.body.classList.toggle('touch', isTouch);
+const joy = {dx: 0, dy: 0, run: false};
+(() => {   // virtual joystick: push to the edge to run
+  const el = document.getElementById('joy'), knob = document.getElementById('knob'), R = 48; let id = null;
+  const move = e => { const r = el.getBoundingClientRect(); let vx = e.clientX - (r.left + r.width / 2), vy = e.clientY - (r.top + r.height / 2);
+    const m = Math.hypot(vx, vy), k = m > R ? R / m : 1; vx *= k; vy *= k; knob.style.transform = `translate(${vx}px,${vy}px)`;
+    joy.dx = Math.abs(vx) > R * .35 ? Math.sign(vx) : 0; joy.dy = Math.abs(vy) > R * .35 ? Math.sign(vy) : 0; joy.run = m > R * .95 && !!(joy.dx || joy.dy); };
+  const end = e => { if (e.pointerId !== id) return; id = null; joy.dx = joy.dy = 0; joy.run = false; knob.style.transform = ''; };
+  el.addEventListener('pointerdown', e => { id = e.pointerId; try { el.setPointerCapture(id); } catch (_) {} move(e); e.preventDefault(); });
+  el.addEventListener('pointermove', e => { if (e.pointerId === id) move(e); });
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+})();
 const ZSIZE = {outside: [1536, 1024], chapel: [1536, 1024], farm: [1536, 1024], house: [820, 540], barn: [630, 480]};
 let me = null, zone = 'outside', state = {}, sprites = {}, scene, chatQueue = [];
 const log = document.getElementById('log'), msg = document.getElementById('msg');
@@ -34,6 +57,10 @@ class Main extends Phaser.Scene {
       held[e.code] = true; });
     window.addEventListener('keyup', e => { held[e.code] = false; });
     window.addEventListener('blur', () => { for (const k in held) held[k] = false; });
+    const chatBox = document.getElementById('chat');
+    document.getElementById('bHop').addEventListener('pointerdown', e => { e.preventDefault(); ws.send(JSON.stringify({t: 'attack'})); });
+    document.getElementById('bChat').addEventListener('pointerdown', e => { e.preventDefault(); chatBox.classList.add('open'); msg.focus(); });
+    msg.addEventListener('blur', () => setTimeout(() => chatBox.classList.remove('open'), 100));
     msg.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') msg.blur(); if (e.key === 'Enter') { if (msg.value.trim()) ws.send(JSON.stringify({t: 'chat', text: msg.value})); msg.value = ''; msg.blur(); } });
     // Animated gate + chapel door: leaves squash toward their hinges when a player is near
     this.leaves = [
@@ -63,14 +90,15 @@ class Main extends Phaser.Scene {
       d.open += ((near ? 1 : 0) - d.open) * (1 - Math.exp(-dt / 110));
       d.parts.forEach(s => s.setVisible(zone === 'outside').setScale(1 - .9 * d.open, 1));
     }
-    const h = c => !!(held[c]), dx = (h('KeyD') || h('ArrowRight')) - (h('KeyA') || h('ArrowLeft')),
-          dy = (h('KeyS') || h('ArrowDown')) - (h('KeyW') || h('ArrowUp')),
-          run = h('ShiftLeft') || h('ShiftRight') ? 1 : 0, cmd = document.activeElement === msg ? '0,0,0' : dx + ',' + dy + ',' + run;
+    const h = c => !!(held[c]), clamp = v => Math.max(-1, Math.min(1, v)),
+          dx = clamp((h('KeyD') || h('ArrowRight')) - (h('KeyA') || h('ArrowLeft')) + joy.dx),
+          dy = clamp((h('KeyS') || h('ArrowDown')) - (h('KeyW') || h('ArrowUp')) + joy.dy),
+          run = h('ShiftLeft') || h('ShiftRight') || joy.run ? 1 : 0, cmd = document.activeElement === msg ? '0,0,0' : dx + ',' + dy + ',' + run;
     if (cmd !== this.sent) { this.sent = cmd; const [a, b, r] = cmd.split(',').map(Number); ws.send(JSON.stringify({t: 'input', dx: a, dy: b, run: !!r})); }
     if (this.bg.texture.key !== zone) this.bg.setTexture(zone);
     const sig = zone + innerWidth + 'x' + innerHeight;   // fit camera to the current zone (zoom small interiors)
     if (sig !== this.camSig) { this.camSig = sig; const [w, h] = ZSIZE[zone] || [1536, 1024], cam = this.cameras.main;
-      const zm = w < 1000 ? Math.min(2, Math.max(1, Math.min(innerWidth / w, innerHeight / h) * .95)) : 1;
+      const zm = w < 1000 ? Math.min(2, Math.max(1, Math.min(innerWidth / w, innerHeight / h) * .95)) : (isTouch ? Math.max(.6, Math.min(1, innerWidth / 900)) : 1);
       cam.setZoom(zm); const vw = innerWidth / zm, vh = innerHeight / zm;
       cam.setBounds(Math.min(0, (w - vw) / 2), Math.min(0, (h - vh) / 2), Math.max(w, vw), Math.max(h, vh)); }
     for (const id in sprites) if (!state[id]) { sprites[id].destroy(); delete sprites[id]; }
